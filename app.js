@@ -2,6 +2,9 @@
   "use strict";
 
   const STORAGE_KEY = "morning-drill-v1";
+  const params = new URLSearchParams(location.search);
+  const FORCE = params.get("force") === "1" || params.get("force") === "true";
+  const AUTOSTART = params.get("autostart") || (FORCE ? "morning" : "");
   const DEFAULTS = {
     preset: "everything",
     mathMinutes: 5,
@@ -30,7 +33,14 @@
     helpKind: null,
     usedHint: false,
     savedThis: false,
+    force: FORCE,
+    wakeLock: null,
   };
+
+  if (FORCE) {
+    // Force mornings always use strict unlock — backup alarm is the stick.
+    state.settings.strict = true;
+  }
 
   function loadSettings() {
     try {
@@ -400,6 +410,7 @@
     state.help = null;
     render();
     startTicker();
+    if (state.force && kind === "morning") requestWakeLock();
   }
 
   function nextQuestion() {
@@ -606,13 +617,55 @@
 
   function canUnlock() {
     if (!state.settings.strict) return true;
-    return state.session.correct >= state.settings.minCorrect;
+    return (state.session?.correct || 0) >= state.settings.minCorrect;
+  }
+
+  function inForcedSession() {
+    return state.force && state.session && state.session.kind === "morning" && state.screen !== "done";
   }
 
   function runShortcut(name) {
     // iOS Shortcuts URL scheme
     const url = `shortcuts://run-shortcut?name=${encodeURIComponent(name)}`;
     window.location.href = url;
+  }
+
+  async function requestWakeLock() {
+    try {
+      if ("wakeLock" in navigator) {
+        state.wakeLock = await navigator.wakeLock.request("screen");
+        state.wakeLock.addEventListener("release", () => { state.wakeLock = null; });
+      }
+    } catch {
+      /* ignore — not available / denied */
+    }
+  }
+
+  function releaseWakeLock() {
+    try { state.wakeLock?.release(); } catch { /* ignore */ }
+    state.wakeLock = null;
+  }
+
+  function silenceBackupAlarms() {
+    // Morning Done should toggle OFF every backup alarm.
+    // Drill Done is optional logging; fire it first so Morning Done still opens.
+    try {
+      localStorage.setItem(STORAGE_KEY + ":lastDone", String(Date.now()));
+    } catch { /* ignore */ }
+    releaseWakeLock();
+    // Chain: mark done, then silence alarms (primary)
+    const drill = `shortcuts://run-shortcut?name=${encodeURIComponent("Drill Done")}`;
+    const morning = `shortcuts://run-shortcut?name=${encodeURIComponent("Morning Done")}`;
+    // Open Drill Done in a hidden iframe attempt, then navigate to Morning Done.
+    try {
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src = drill;
+      document.body.appendChild(iframe);
+      setTimeout(() => { window.location.href = morning; }, 350);
+    } catch {
+      window.location.href = morning;
+    }
   }
 
   // ---------- input ----------
@@ -742,7 +795,16 @@
           <button class="btn block" data-start="unlock">5‑min unlock drill</button>
           <button class="btn ghost block" data-go="revision">Revision (${state.revision.length})</button>
         </div>
-        <div class="tiny">Add to Home Screen from Safari for a full-screen app. Shortcuts can open this URL when your alarm stops.</div>
+        <div class="card">
+          <div style="font-weight:700;margin-bottom:6px">Force yourself (no triple‑click)</div>
+          <div class="tiny">A webpage cannot lock your phone. The stick is a <strong>backup alarm</strong> that only turns off when you finish.</div>
+          <ol class="tiny" style="margin:8px 0 0;padding-left:18px;line-height:1.45">
+            <li>Main alarm opens this link with <span class="mono">?force=1</span>.</li>
+            <li>Backup alarms at +10 / +15 / +20 stay on.</li>
+            <li>Finish ≥${state.settings.minCorrect} correct → <strong>Silence backup alarms</strong> runs shortcut <span class="mono">Morning Done</span>.</li>
+          </ol>
+          <div class="tiny" style="margin-top:8px">Alarm automation URL:<br><span class="mono">https://stijntjeblommie.github.io/drill/?force=1</span></div>
+        </div>
       </section>`;
   }
 
@@ -898,7 +960,9 @@
           <div class="timer-big" id="ex-timer">${formatRemain(remain)}</div>
           <div class="sub">Honor system — keep moving until the timer hits zero.</div>
         </div>
-        <button class="btn block" data-act="skip-ex">Skip exercise</button>
+        ${state.force
+          ? `<div class="tiny" style="text-align:center">Skip is disabled in force mode. Wait out the timer.</div>`
+          : `<button class="btn block" data-act="skip-ex">Skip exercise</button>`}
       </section>`;
   }
 
@@ -910,13 +974,17 @@
       .filter((x) => x.n > 0)
       .sort((a, b) => a.rate - b.rate || b.n - a.n)
       .slice(0, 5);
+    const need = Math.max(0, state.settings.minCorrect - sess.correct);
     return `
       <section class="screen active">
         <div class="topbar">
           <div class="brand">Done</div>
-          <button class="btn ghost" data-go="home">Home</button>
+          ${unlocked || !state.force ? `<button class="btn ghost" data-go="home">Home</button>` : `<span class="tiny">locked</span>`}
         </div>
         <div class="hero">${unlocked ? "Drill complete." : "Not yet."}</div>
+        <div class="sub">${unlocked
+          ? "Only this button silences your backup alarms. Don’t turn them off in Clock."
+          : `Need ${need} more correct before the backup alarm can be silenced.`}</div>
         <div class="statgrid">
           <div class="stat"><div class="n">${sess.score}</div><div class="l">score</div></div>
           <div class="stat"><div class="n">${sess.correct}</div><div class="l">correct</div></div>
@@ -928,10 +996,10 @@
         </div>
         <div class="stack">
           ${unlocked
-            ? `<button class="btn good block" data-act="morning-done">Turn off backup alarm</button>
-               <button class="btn primary block" data-act="drill-done">Mark Drill Done</button>`
+            ? `<button class="btn good block" data-act="silence">Silence backup alarms</button>
+               <div class="tiny">Runs shortcuts <strong>Drill Done</strong> then <strong>Morning Done</strong>.</div>`
             : `<button class="btn primary block" data-start="${sess.kind === "unlock" ? "unlock" : "morning"}">Another round</button>
-               <div class="tiny">Strict mode needs ${state.settings.minCorrect} correct before unlock actions appear.</div>`}
+               <div class="tiny">Strict mode needs ${state.settings.minCorrect} correct before unlock.</div>`}
         </div>
       </section>`;
   }
@@ -949,9 +1017,14 @@
 
   function bind() {
     app.querySelectorAll("[data-go]").forEach((el) => el.addEventListener("click", () => {
-      if (el.getAttribute("data-go") === "settings") saveSettingsFromForm();
-      state.screen = el.getAttribute("data-go");
-      if (state.screen === "home") { state.session = null; }
+      const dest = el.getAttribute("data-go");
+      if (inForcedSession() && dest === "home") return;
+      if (dest === "settings") saveSettingsFromForm();
+      state.screen = dest;
+      if (state.screen === "home") {
+        state.session = null;
+        releaseWakeLock();
+      }
       render();
     }));
     app.querySelectorAll("[data-start]").forEach((el) => el.addEventListener("click", () => {
@@ -968,8 +1041,11 @@
       }
       else if (act === "save") saveQuestion(state.session.question, false);
       else if (act === "skip") skipQuestion();
-      else if (act === "skip-ex") finishExercise();
-      else if (act === "morning-done") runShortcut("Morning Done");
+      else if (act === "skip-ex") {
+        if (state.force) return;
+        finishExercise();
+      }
+      else if (act === "silence" || act === "morning-done") silenceBackupAlarms();
       else if (act === "drill-done") runShortcut("Drill Done");
     }));
     app.querySelectorAll("[data-show-rev]").forEach((el) => el.addEventListener("click", () => {
@@ -1023,7 +1099,14 @@
     }
   }, { passive: true });
 
-  // Service worker optional — skip for simplicity on GH pages path issues
+  // Re-acquire wake lock if the tab becomes visible again during a force session
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && inForcedSession()) requestWakeLock();
+  });
 
   render();
+  if (AUTOSTART === "morning" || AUTOSTART === "unlock") {
+    // Defer so first paint shows, then jump straight into the drill after alarm.
+    setTimeout(() => startSession(AUTOSTART), 80);
+  }
 })();
