@@ -47,7 +47,9 @@ body {
   margin: 0 auto;
 }
 
-.screen { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 12px; }
+.screen { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 12px; overflow-y: auto; }
+/* Only .grow areas may shrink; everything else keeps its height and the screen scrolls. */
+.screen > :not(.grow) { flex-shrink: 0; }
 .screen.active { display: flex; }
 
 .topbar {
@@ -193,11 +195,12 @@ body {
 
 .keypad {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
   margin-top: auto;
   flex-shrink: 0;
 }
+.key.zero { grid-column: span 3; }
 
 .key {
   background: var(--key);
@@ -271,3 +274,17 @@ select, input[type="number"], input[type="text"] {
 .list-item:last-child { border-bottom: 0; }
 
 .tiny { font-size: 0.8rem; color: var(--muted); }
+
+/* Shorter iPhone screens in Safari (toolbars take ~180px): tighten the drill so the keypad fits. */
+@media (max-height: 700px) {
+  .screen { gap: 8px; }
+  .card { padding: 12px; }
+  .question-box { padding: 12px; }
+  .answer { margin-top: 6px; }
+  .key { min-height: 46px; }
+}
+@media (max-height: 600px) {
+  .key { min-height: 40px; }
+  .question { min-height: 0; font-size: 1.2rem; }
+  .card .sub { font-size: 0.85rem; }
+}

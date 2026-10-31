@@ -73,6 +73,37 @@
     localStorage.setItem(STORAGE_KEY + ":best", JSON.stringify(state.best));
   }
 
+  // ---------- force-mode persistence ----------
+  // Same yyyy-MM-dd format the Morning Done shortcut writes to drill-done.txt.
+  function todayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+  function doneToday() {
+    try { return localStorage.getItem(STORAGE_KEY + ":doneDay") === todayStr(); } catch { return false; }
+  }
+  function markDoneToday() {
+    try { localStorage.setItem(STORAGE_KEY + ":doneDay", todayStr()); } catch { /* ignore */ }
+  }
+  // Keep today's forced session so a reload or a bounce back from the app gate
+  // resumes it instead of starting over (and can't be used to dodge it).
+  function saveForcedSession() {
+    if (!state.force || !state.session || state.session.kind !== "morning") return;
+    try {
+      localStorage.setItem(STORAGE_KEY + ":session", JSON.stringify({ day: todayStr(), screen: state.screen, session: state.session }));
+    } catch { /* ignore */ }
+  }
+  function loadForcedSession() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY + ":session") || "null");
+      if (saved && saved.day === todayStr() && saved.session && saved.session.kind === "morning") return saved;
+    } catch { /* ignore */ }
+    return null;
+  }
+  function clearForcedSession() {
+    try { localStorage.removeItem(STORAGE_KEY + ":session"); } catch { /* ignore */ }
+  }
+
   const rnd = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
   const pick = (arr) => arr[rnd(0, arr.length - 1)];
   const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
@@ -647,25 +678,23 @@
   }
 
   function silenceBackupAlarms() {
-    // Morning Done should toggle OFF every backup alarm.
-    // Drill Done is optional logging; fire it first so Morning Done still opens.
-    try {
-      localStorage.setItem(STORAGE_KEY + ":lastDone", String(Date.now()));
-    } catch { /* ignore */ }
+    // One shortcut does everything: writes today's date to drill-done.txt
+    // (which the app gate checks) and turns the backup alarms off.
+    // Chaining two shortcuts doesn't work: the first one leaves Safari.
+    markDoneToday();
+    clearForcedSession();
     releaseWakeLock();
-    // Chain: mark done, then silence alarms (primary)
-    const drill = `shortcuts://run-shortcut?name=${encodeURIComponent("Drill Done")}`;
-    const morning = `shortcuts://run-shortcut?name=${encodeURIComponent("Morning Done")}`;
-    // Open Drill Done in a hidden iframe attempt, then navigate to Morning Done.
-    try {
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src = drill;
-      document.body.appendChild(iframe);
-      setTimeout(() => { window.location.href = morning; }, 350);
-    } catch {
-      window.location.href = morning;
-    }
+    runShortcut("Morning Done");
+  }
+
+  function resumeForcedSession(saved) {
+    state.session = saved.session;
+    state.screen = saved.screen;
+    // Fresh question on resume so "show answer → reload → type it" can't score.
+    if (state.screen === "math" || state.screen === "trick") nextQuestion();
+    render();
+    startTicker();
+    requestWakeLock();
   }
 
   // ---------- input ----------
@@ -763,7 +792,24 @@
     else if (state.screen === "math") app.innerHTML = renderMath();
     else if (state.screen === "exercise") app.innerHTML = renderExercise();
     else if (state.screen === "done") app.innerHTML = renderDone();
+    else if (state.screen === "already") app.innerHTML = renderAlreadyDone();
     bind();
+    saveForcedSession();
+  }
+
+  function renderAlreadyDone() {
+    return `
+      <section class="screen active">
+        <div class="topbar">
+          <div class="brand">Morning Drill</div>
+          <button class="btn ghost" data-go="home">Home</button>
+        </div>
+        <div class="hero">Done for today.</div>
+        <div class="sub">You already finished today’s drill. If you got sent here again, the <strong>Morning Done</strong> shortcut didn’t run. Tap below to run it again.</div>
+        <div class="stack grow" style="justify-content:flex-end">
+          <button class="btn good block" data-act="silence">Run Morning Done again</button>
+        </div>
+      </section>`;
   }
 
   function renderAnswerOnly() {
@@ -790,7 +836,7 @@
           <div class="stat"><div class="n">${best}</div><div class="l">best score</div></div>
           <div class="stat"><div class="n">${state.revision.length}</div><div class="l">to revise</div></div>
         </div>
-        <div class="stack grow" style="justify-content:flex-end">
+        <div class="stack grow" style="justify-content:flex-end;flex:1 0 auto">
           <button class="btn primary block" data-start="morning">Start morning drill</button>
           <button class="btn block" data-start="unlock">5‑min unlock drill</button>
           <button class="btn ghost block" data-go="revision">Revision (${state.revision.length})</button>
@@ -799,8 +845,9 @@
           <div style="font-weight:700;margin-bottom:6px">Force yourself (no triple‑click)</div>
           <div class="tiny">A webpage cannot lock your phone. The stick is a <strong>backup alarm</strong> that only turns off when you finish.</div>
           <ol class="tiny" style="margin:8px 0 0;padding-left:18px;line-height:1.45">
-            <li>Main alarm opens this link with <span class="mono">?force=1</span>.</li>
-            <li>Backup alarms at +10 / +15 / +20 stay on.</li>
+            <li>Every alarm opens this link with <span class="mono">?force=1</span>.</li>
+            <li>Backup alarms keep ringing until you finish.</li>
+            <li>Opening Instagram, WhatsApp, Clock and so on before you finish sends you back here.</li>
             <li>Finish ≥${state.settings.minCorrect} correct → <strong>Silence backup alarms</strong> runs shortcut <span class="mono">Morning Done</span>.</li>
           </ol>
           <div class="tiny" style="margin-top:8px">Alarm automation URL:<br><span class="mono">https://stijntjeblommie.github.io/drill/?force=1</span></div>
@@ -848,7 +895,7 @@
           </label>
           <div class="toggle"><span>Strict mode</span><input type="checkbox" id="strict" ${s.strict ? "checked" : ""}></div>
           <div class="toggle"><span>Negative marking</span><input type="checkbox" id="negativeMarking" ${s.negativeMarking ? "checked" : ""}></div>
-          <div class="tiny">Shortcut names expected: <strong>Morning Done</strong> and <strong>Drill Done</strong>.</div>
+          <div class="tiny">Shortcut name expected: <strong>Morning Done</strong>.</div>
         </div>
       </section>`;
   }
@@ -933,16 +980,18 @@
     return `
       <div class="row">
         <button class="btn ghost" data-act="hint">Hint</button>
-        <button class="btn ghost" data-act="answer">${state.helpKind === "answer" ? "Next" : "Show answer"}</button>
+        <button class="btn ghost" data-act="answer">${state.helpKind === "answer" ? "Next" : "Answer"}</button>
         <button class="btn ghost" data-act="save">Save</button>
         <button class="btn ghost" data-act="skip">Skip</button>
       </div>`;
   }
 
   function renderKeypad() {
-    const keys = ["1","2","3","4","5","6","7","8","9","±","0",".","C","⌫"];
+    // 4 columns so all keys fit on an iPhone screen in Safari without scrolling.
+    const keys = ["1","2","3","⌫","4","5","6","C","7","8","9","±","0","."];
+    const cls = (k) => (k === "C" || k === "⌫" || k === "±" ? "action" : k === "0" ? "zero" : "");
     return `<div class="keypad" id="keypad">
-      ${keys.map((k) => `<button class="key ${k === "C" || k === "⌫" || k === "±" ? "action" : ""}" data-key="${k}">${k}</button>`).join("")}
+      ${keys.map((k) => `<button class="key ${cls(k)}" data-key="${k}">${k}</button>`).join("")}
     </div>`;
   }
 
@@ -997,7 +1046,7 @@
         <div class="stack">
           ${unlocked
             ? `<button class="btn good block" data-act="silence">Silence backup alarms</button>
-               <div class="tiny">Runs shortcuts <strong>Drill Done</strong> then <strong>Morning Done</strong>.</div>`
+               <div class="tiny">Runs your <strong>Morning Done</strong> shortcut. It marks today as done and turns off the backups.</div>`
             : `<button class="btn primary block" data-start="${sess.kind === "unlock" ? "unlock" : "morning"}">Another round</button>
                <div class="tiny">Strict mode needs ${state.settings.minCorrect} correct before unlock.</div>`}
         </div>
@@ -1046,7 +1095,6 @@
         finishExercise();
       }
       else if (act === "silence" || act === "morning-done") silenceBackupAlarms();
-      else if (act === "drill-done") runShortcut("Drill Done");
     }));
     app.querySelectorAll("[data-show-rev]").forEach((el) => el.addEventListener("click", () => {
       const id = el.getAttribute("data-show-rev");
@@ -1105,8 +1153,18 @@
   });
 
   render();
-  if (AUTOSTART === "morning" || AUTOSTART === "unlock") {
-    // Defer so first paint shows, then jump straight into the drill after alarm.
+  if (FORCE) {
+    const saved = loadForcedSession();
+    if (doneToday()) {
+      state.screen = "already";
+      render();
+    } else if (saved && ["trick", "math", "exercise", "done"].includes(saved.screen)) {
+      resumeForcedSession(saved);
+    } else {
+      // Defer so first paint shows, then jump straight into the drill after alarm.
+      setTimeout(() => startSession("morning"), 80);
+    }
+  } else if (AUTOSTART === "morning" || AUTOSTART === "unlock") {
     setTimeout(() => startSession(AUTOSTART), 80);
   }
 })();
